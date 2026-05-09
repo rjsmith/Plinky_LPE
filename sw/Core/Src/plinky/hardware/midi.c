@@ -658,24 +658,26 @@ static void cue_midi_out(void) {
 					midi_out_channel = sys_params.midi_out_chan;
 
 				// send param value as cc
-				if (sys_params.midi_send_param_ccs == SP_CC) {
-					if ((*send_mask & 1)
-					    && !send_midi_msg(MIDI_CONTROL_CHANGE, midi_cc_table_rvs[send_param],
-					                      param_cc_value(send_param)))
+				if (sys_params.midi_send_param_ccs != SP_NRPN) {
+					u8 midi_cc = midi_cc_table_rvs[send_param];
+					// not marked to send or no valid cc => skip
+					if (!(*send_mask & 1) || midi_cc == 255)
+						continue;
+					if (!send_midi_msg(MIDI_CONTROL_CHANGE, midi_cc_table_rvs[send_param], param_cc_value(send_param)))
 						return;
 				}
 				// send nrpns
 				else {
 					// send param and modulation values (nrpn pages 0-7)
 					for (ModSource mod_src = sending_param_progress; mod_src < NUM_MOD_SOURCES; mod_src++) {
-						// param not marked to send - skip
-						if (!(*send_mask & (1 << mod_src))) {
+						u14 nrpn_value;
+						// param not marked to send or no valid nrpn => skip
+						if (!(*send_mask & (1 << mod_src))
+						    // live nrpns inlude global layout values
+						    || !get_param_nrpn_value(send_param, mod_src, true, &nrpn_value)) {
 							sending_param_progress++;
 							continue;
 						}
-						u14 nrpn_value;
-						// live nrpns inlude global layout values
-						get_param_nrpn_value(send_param, mod_src, true, &nrpn_value);
 						if (!send_nrpn(mod_src, send_param, nrpn_value, false))
 							return;
 						sending_param_progress++;
@@ -717,6 +719,7 @@ static void try_apply_n_rpn(bool is_rpn, u8 n_rpn_string, bool mpe_member) {
 		NA_NONE,
 		NA_SET_PARAM,
 		NA_SET_MOD,
+		NA_SEND_VALUES,
 	} NRPN_Action;
 
 	// value not fully received
@@ -780,6 +783,9 @@ static void try_apply_n_rpn(bool is_rpn, u8 n_rpn_string, bool mpe_member) {
 			multi = true;
 			string_id = id_msb - 8;
 		}
+		// 16-23 => send values
+		else if (id_msb < 24)
+			nrpn_action = NA_SEND_VALUES;
 		// msb invalid
 		else
 			return;
@@ -788,17 +794,30 @@ static void try_apply_n_rpn(bool is_rpn, u8 n_rpn_string, bool mpe_member) {
 	// take action
 	u8 param_id = nrpn_id[n_rpn_string].lsb;
 
-	if (param_id >= NUM_PARAMS)
-		return;
-
 	switch (nrpn_action) {
 	case NA_NONE:
 		break;
 	case NA_SET_PARAM:
-		set_param_from_nrpn(param_id, n_rpn_value[n_rpn_string], multi, string_id);
+		if (param_id < NUM_PARAMS)
+			set_param_from_nrpn(param_id, n_rpn_value[n_rpn_string], multi, string_id);
 		break;
 	case NA_SET_MOD:
-		set_mod_from_nrpn(param_id, n_rpn_value[n_rpn_string], id_msb);
+		if (param_id < NUM_PARAMS)
+			set_mod_from_nrpn(param_id, n_rpn_value[n_rpn_string], id_msb);
+		break;
+	case NA_SEND_VALUES:
+		// requires a value of 16383
+		if (n_rpn_value[n_rpn_string].value != UINT14_MAX)
+			break;
+		ModSource mod_src = id_msb - 16;
+		// send single param/modulation
+		if (param_id < NUM_PARAMS)
+			midi_send_param(param_id, mod_src);
+		// send full page
+		else if (param_id == 127) {
+			for (u8 p_id = 0; p_id < NUM_PARAMS; p_id++)
+				midi_send_param(p_id, mod_src);
+		}
 		break;
 	}
 }
