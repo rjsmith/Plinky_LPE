@@ -31,6 +31,13 @@ typedef struct GrainPair {
 	int outflags;
 } GrainPair;
 
+typedef enum ADSR_STATE {
+	ADSR_ATTACK,
+	ADSR_DECAY,
+	ADSR_SUSTAIN,
+	ADSR_RELEASE,
+} ADSR_STATE;
+
 typedef struct Voice {
 	// oscillator (sampler only uses the pitch value)
 	Osc osc[OSCS_PER_VOICE];
@@ -38,10 +45,10 @@ typedef struct Voice {
 	u16 pitch;
 	// env 1
 	float env1_lvl;
-	bool env1_decaying;
+	ADSR_STATE adsr;
 	ValueSmoother lpg_smoother[2];
 	// env 1 visuals
-	float env1_peak;
+	float env1_freeze;
 	float env1_norm;
 	// noise
 	float noise_lvl;
@@ -1335,66 +1342,76 @@ static void run_voice(u8 voice_id, u32* dst) {
 
 	// == UPDATE ENVELOPE == //
 
-	float env_goal = 0.f;
+	// peak of the envelope, based on the intensity of the pressure
+	float env_peak = 0.f;
 
-	// calc goal lpg
 	if (s_string->touched) {
 		float sens = param_val_multi(MP_ENV_LVL1, voice_id) * (2.f / 65536.f);
-		env_goal = pressure * 1.f / TOUCH_FULL_PRES * sens * sens;
-		if (env_goal < 0.f)
-			env_goal = 0.f;
-		env_goal *= env_goal;
+		env_peak = pressure * 1.f / TOUCH_FULL_PRES * sens * sens;
+		if (env_peak < 0.f)
+			env_peak = 0.f;
+		env_peak *= env_peak;
 		// filter cutoff pitch tracking
-		env_goal *= 1.f + ((voice->osc[2].pitch - (43000 + OCTS_TO_PITCH(2))) * (1.f / 65536.f));
+		env_peak *= 1.f + ((voice->osc[2].pitch - (43000 + OCTS_TO_PITCH(2))) * (1.f / 65536.f));
 	}
 
-	// retrieve envelope params
 	bool is_sample_preview = ui_mode == UI_SAMPLE_EDIT;
-	const float attack = is_sample_preview ? 0.5f : lpf_k((param_val_multi(MP_ATTACK1, voice_id)));
-	const float decay = is_sample_preview ? 1.f : lpf_k((param_val_multi(MP_DECAY1, voice_id)));
 	const float sustain = is_sample_preview ? 1.f : squaref(param_val_multi(MP_SUSTAIN1, voice_id) * (1.f / 65536.f));
-	const float release = is_sample_preview ? 0.5f : lpf_k((param_val_multi(MP_RELEASE1, voice_id)));
 
-	// retrigger envelope
+	// sustain is not defined as a separate phase, it is just the decay phase where we already reached
+	// the sustain level and therefor env_diff will be 0
+
+	ADSR_STATE* adsr = &voice->adsr;
+
+	// envelope trigger => attack stage
 	if (s_string->env_trigger) {
+		*adsr = ADSR_ATTACK;
 		env_lvl *= sustain;
-		voice->env1_decaying = false;
-		voice->env1_peak = env_goal;
+		voice->env1_freeze = 0;
 		cv_trig_out_high = true; // send cv trigger
 	}
 
-	if (env_goal <= 0.f) // no pressure => release phase (aka not decaying)
-		voice->env1_decaying = false;
-	else if (voice->env1_decaying) // in decay phase => aim for sustain level
-		env_goal *= sustain;
+	// define goal
+	float env_goal = env_peak *
+	                 // attack: goal = peak value
+	                 (*adsr == ADSR_ATTACK ? 1
+	                  // decay: goal = sustain value
+	                  : *adsr == ADSR_DECAY ? sustain
+	                                        // release: goal = bottom
+	                                        : 0);
 
-	// apply envelope
-	float lpg_diff = env_goal - env_lvl;
-	lpg_diff *= (lpg_diff > 0.f) ? attack : env_goal ? decay : release;
-	env_lvl += lpg_diff;
+	// move towards goal
+	float env_diff = env_goal - env_lvl;
+	if (env_diff) {
+		const float slope =
+		    // attack
+		    *adsr == ADSR_ATTACK ? is_sample_preview ? 0.5f : lpf_k(param_val_multi(MP_ATTACK1, voice_id))
+		    // decay (uses attack slope in upwards movements)
+		    : *adsr == ADSR_DECAY ? env_diff > 0
+		                                ? (is_sample_preview ? 0.5f : lpf_k(param_val_multi(MP_ATTACK1, voice_id)))
+		                                : (is_sample_preview ? 1.f : lpf_k(param_val_multi(MP_DECAY1, voice_id)))
+		                          // release
+		                          : (is_sample_preview ? 0.5f : lpf_k(param_val_multi(MP_RELEASE1, voice_id)));
+		env_lvl += env_diff * slope;
+	}
 
-	// release phase
-	if (env_goal <= 0.f)
-		voice->env1_norm = voice->env1_peak == 0 ? 0 : env_lvl / voice->env1_peak;
-	// decay/sustain phase
-	else if (voice->env1_decaying) {
-		voice->env1_norm = 1;
-		voice->env1_peak = env_lvl;
+	float attack_thresh = env_peak * 0.95f;
+	// no pressure => release stage
+	if (env_peak <= 0.f)
+		*adsr = ADSR_RELEASE;
+	// hit the peak of the envelope => decay stage
+	else if (env_lvl > attack_thresh || env_lvl > 1.f) {
+		*adsr = ADSR_DECAY;
+		env_lvl = minf(env_lvl, 1.f);
 	}
-	// attack phase
-	else {
-		voice->env1_norm = env_lvl / env_goal;
-		if (env_goal > voice->env1_peak)
-			voice->env1_peak = env_goal;
-	}
-	// we hit the peak! time to decay
-	if (env_lvl > env_goal * 0.95f)
-		voice->env1_decaying = true;
-	// constrain to max 1.0
-	if (env_lvl > 1.f) {
-		env_lvl = 1.f;
-		voice->env1_decaying = true;
-	}
+
+	// track envelope for voice bar graphics
+	if ((*adsr == ADSR_ATTACK && env_lvl > voice->env1_freeze) || *adsr == ADSR_DECAY)
+		voice->env1_freeze = env_lvl;
+	voice->env1_norm = env_lvl <= 0           ? 0
+	                   : *adsr == ADSR_ATTACK ? env_lvl / minf(attack_thresh, 1.f)
+	                   : *adsr == ADSR_DECAY  ? 1
+	                                          : env_lvl / voice->env1_freeze;
 
 	// track max pressure
 	u16 env_16 = maxi(env_lvl * 2048, 0);
