@@ -114,7 +114,7 @@ static u8 thru_buffer[THRU_BUFFER_SIZE][3];
 static u8 thru_buffer_head = 0;
 static u8 thru_buffer_tail = 0;
 static u8 thru_buffer_count = 0;
-static u8 send_param_val[NUM_PARAMS] = {};
+static u16 send_param_val[NUM_PARAMS] = {}; // LSB = mod_src mark, MSB = per-string mask
 static Param sending_param_id = 0;
 static u8 sending_param_progress = 255;
 
@@ -654,7 +654,8 @@ static void cue_midi_out(void) {
 		// we have a param to send
 		if (send_param != NUM_PARAMS) {
 			sending_param_id = send_param;
-			u8* send_mask = &send_param_val[send_param];
+			u8 send_mask_mod_src = send_param_val[send_param] & 0xFF;
+			u8* send_mask = &send_mask_mod_src;
 			for (u8 zone = 0; zone < (sys_params.mpe_out ? 2 : 1); zone++) {
 				// set midi channel
 				if (sys_params.mpe_out) {
@@ -692,13 +693,18 @@ static void cue_midi_out(void) {
 						sending_param_progress++;
 					}
 					// send multi param values (nrpn pages 8-15)
-					if (PARAM_IS_MULTI_TIMBRAL(send_param) && (*send_mask & 1)) {
+					u8 string_send_mask = (send_param_val[send_param] >> 8) & 0xFF;
+					if (string_send_mask && PARAM_IS_MULTI_TIMBRAL(send_param) && (*send_mask & 1 /* MOD_BASE*/)) {
+						// Loop over the 8 strings
 						for (u8 page_id = sending_param_progress; page_id < 16; page_id++) {
-							u14 nrpn_value;
-							// live nrpns inlude global layout values
-							get_param_nrpn_value_multi(send_param, page_id - 8, true, &nrpn_value);
-							if (!send_nrpn(page_id, send_param, nrpn_value, false))
-								return;
+							// send per-string param if send all strings, or send this string only
+							if (string_send_mask & (1 << (page_id - 8))) {
+								u14 nrpn_value;
+								// live nrpns inlude global layout values
+								get_param_nrpn_value_multi(send_param, page_id - 8, true, &nrpn_value);
+								if (!send_nrpn(page_id, send_param, nrpn_value, false))
+									return;
+							}
 							sending_param_progress++;
 						}
 					}
@@ -815,17 +821,27 @@ static void try_apply_n_rpn(bool is_rpn, u8 n_rpn_string, bool mpe_member) {
 			set_mod_from_nrpn(param_id, n_rpn_value[n_rpn_string], id_msb);
 		break;
 	case NA_SEND_VALUES:
-		// requires a value of 16383
-		if (n_rpn_value[n_rpn_string].value != UINT14_MAX)
-			break;
+		// value 255 = send for all strings, 
+		// value 1-8 = send specific string only if multi-timbral,
+		// value 0 = do not send any per-string values
+		// else invalid
+		u8 stringNum = 0;
+		if (n_rpn_value[n_rpn_string].value > 0 && n_rpn_value[n_rpn_string].value < 9)
+			stringNum = n_rpn_value[n_rpn_string].value;
+		else if (n_rpn_value[n_rpn_string].value == 0)
+			stringNum = 0;
+		else if (n_rpn_value[n_rpn_string].value == 0xFF)
+			stringNum = 0xFF;
+		else 
+			break;	// Invalid NA_SEND_VALUES command value
 		ModSource mod_src = id_msb - 16;
 		// send single param/modulation
 		if (param_id < NUM_PARAMS)
-			midi_send_param(param_id, mod_src);
+			midi_send_param(param_id, mod_src, stringNum);
 		// send full page
 		else if (param_id == 127) {
 			for (u8 p_id = 0; p_id < NUM_PARAMS; p_id++)
-				midi_send_param(p_id, mod_src);
+				midi_send_param(p_id, mod_src, stringNum);
 		}
 		break;
 	}
@@ -1502,8 +1518,13 @@ void midi_send_transport(MidiMessageType transport_type) {
 		send_transport = transport_type;
 }
 
-void midi_send_param(Param param_id, ModSource mod_src) {
+void midi_send_param(Param param_id, ModSource mod_src, u8 stringNum /* 1 - 8 = per-string, 255 = all strings, 0 = no strings */) {
 	send_param_val[param_id] |= 1 << mod_src;
+	if (stringNum == 0xFF)
+		send_param_val[param_id] |= 0xFF << 8;
+	else if (stringNum > 0) {
+		send_param_val[param_id] |= 1 << (stringNum + 7);
+	}
 }
 
 // == VISUALS == //
