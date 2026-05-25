@@ -683,7 +683,7 @@ static void cue_midi_out(void) {
 						u14 nrpn_value;
 						// param not marked to send or no valid nrpn => skip
 						if (!(*send_mask & (1 << mod_src))
-						    // live nrpns inlude global layout values
+						    // live nrpns include global layout values
 						    || !get_param_nrpn_value(send_param, mod_src, true, &nrpn_value)) {
 							sending_param_progress++;
 							continue;
@@ -697,10 +697,9 @@ static void cue_midi_out(void) {
 					if (string_send_mask && PARAM_IS_MULTI_TIMBRAL(send_param) && (*send_mask & 1 /* MOD_BASE*/)) {
 						// Loop over the 8 strings
 						for (u8 page_id = sending_param_progress; page_id < 16; page_id++) {
-							// send per-string param if send all strings, or send this string only
+							// send per-string param if allowed by string mask
 							if (string_send_mask & (1 << (page_id - 8))) {
 								u14 nrpn_value;
-								// live nrpns inlude global layout values
 								get_param_nrpn_value_multi(send_param, page_id - 8, true, &nrpn_value);
 								if (!send_nrpn(page_id, send_param, nrpn_value, false))
 									return;
@@ -821,27 +820,22 @@ static void try_apply_n_rpn(bool is_rpn, u8 n_rpn_string, bool mpe_member) {
 			set_mod_from_nrpn(param_id, n_rpn_value[n_rpn_string], id_msb);
 		break;
 	case NA_SEND_VALUES:
-		// value 255 = send for all strings, 
-		// value 1-8 = send specific string only if multi-timbral,
-		// value 0 = do not send any per-string values
+		// value 0..255 = bitmask for which strings to send values for
+		//                ie. 0 will not send any per-string value, 255 (0xFF) will send all 8 per-string values
 		// else invalid
-		u8 stringNum = 0;
-		if (n_rpn_value[n_rpn_string].value > 0 && n_rpn_value[n_rpn_string].value < 9)
-			stringNum = n_rpn_value[n_rpn_string].value;
-		else if (n_rpn_value[n_rpn_string].value == 0)
-			stringNum = 0;
-		else if (n_rpn_value[n_rpn_string].value == 0xFF)
-			stringNum = 0xFF;
+		u8 stringMask = 0;
+		if (n_rpn_value[n_rpn_string].value >= 0 && n_rpn_value[n_rpn_string].value <= 0xFF )
+			stringMask = n_rpn_value[n_rpn_string].value & 0xFF;
 		else 
 			break;	// Invalid NA_SEND_VALUES command value
 		ModSource mod_src = id_msb - 16;
 		// send single param/modulation
 		if (param_id < NUM_PARAMS)
-			midi_send_param(param_id, mod_src, stringNum);
+			midi_send_param(param_id, mod_src, stringMask);
 		// send full page
 		else if (param_id == 127) {
 			for (u8 p_id = 0; p_id < NUM_PARAMS; p_id++)
-				midi_send_param(p_id, mod_src, stringNum);
+				midi_send_param(p_id, mod_src, stringMask);
 		}
 		break;
 	}
@@ -1518,13 +1512,9 @@ void midi_send_transport(MidiMessageType transport_type) {
 		send_transport = transport_type;
 }
 
-void midi_send_param(Param param_id, ModSource mod_src, u8 stringNum /* 1 - 8 = per-string, 255 = all strings, 0 = no strings */) {
+void midi_send_param(Param param_id, ModSource mod_src, u8 stringMask) {
 	send_param_val[param_id] |= 1 << mod_src;
-	if (stringNum == 0xFF)
-		send_param_val[param_id] |= 0xFF << 8;
-	else if (stringNum > 0) {
-		send_param_val[param_id] |= 1 << (stringNum + 7);
-	}
+	send_param_val[param_id] |= stringMask << 8;
 }
 
 // == VISUALS == //

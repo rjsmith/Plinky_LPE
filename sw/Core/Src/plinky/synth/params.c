@@ -698,7 +698,7 @@ void save_multi_param_raw(Param param_id, u8 string_id, s16 data) {
 	    || (sys_params.midi_send_param_ccs == SP_NRPN
 	        && raw_to_u14(data, param_id, SRC_BASE) != raw_to_u14(*target, param_id, SRC_BASE))) {
 		// send to midi, with altered per-string value
-		midi_send_param(param_id, SRC_BASE, string_id + 1);
+		midi_send_param(param_id, SRC_BASE, 1 << string_id);
 	}
 
 	// save
