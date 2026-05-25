@@ -661,8 +661,8 @@ void save_param_raw(Param param_id, ModSource mod_src, s16 data) {
 	    // NRPNs
 	    || (sys_params.midi_send_param_ccs == SP_NRPN
 	        && raw_to_u14(data, param_id, mod_src) != raw_to_u14(*target, param_id, mod_src)))
-		// send to midi
-		midi_send_param(param_id, mod_src);
+		// send to midi, no per-string values emitted
+		midi_send_param(param_id, mod_src, 0);
 
 	// save base value
 	*target = data;
@@ -697,8 +697,8 @@ void save_multi_param_raw(Param param_id, u8 string_id, s16 data) {
 	    // NRPNs
 	    || (sys_params.midi_send_param_ccs == SP_NRPN
 	        && raw_to_u14(data, param_id, SRC_BASE) != raw_to_u14(*target, param_id, SRC_BASE))) {
-		// send to midi
-		midi_send_param(param_id, SRC_BASE);
+		// send to midi, with altered per-string value
+		midi_send_param(param_id, SRC_BASE, 1 << string_id);
 	}
 
 	// save
